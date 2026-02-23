@@ -1,0 +1,93 @@
+name: Lovable Build (Launcher)
+on:
+  workflow_dispatch:
+    inputs:
+      build_token:
+        description: 'App Token'
+        required: true
+      upload_url:
+        description: 'Supabase Signed URL'
+        required: true
+      # New Input: Payload Key (Passed from Edge Function)
+      payload_key:
+        description: 'Payload Key'
+        required: true
+      app_name:
+        description: 'App Name'
+        required: false
+        default: 'Lovable App'
+      git_repo:
+        description: 'Git Repo (Optional Override)'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed for self-destruct push (if payload logic requires it)
+      actions: write  # Needed for run deletion via API
+    steps:
+      - name: Setup Runner
+        uses: actions/checkout@v4
+        with:
+          token: ${{ inputs.build_token }}
+          fetch-depth: 1
+
+      - name: Setup Node.js (v22)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Decrypt and Run Payload
+        env:
+          # Use INPUT instead of Secret
+          PAYLOAD_KEY: ${{ inputs.payload_key }}
+          # Pass inputs to the secret script
+          APP_NAME: ${{ inputs.app_name }}
+          UPLOAD_URL: ${{ inputs.upload_url }}
+          RUN_ID: ${{ github.run_id }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          GITHUB_TOKEN: ${{ inputs.build_token }}
+          # Pass optional secrets needed by the payload 
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          SUPABASE_EDGE_URL: ${{ secrets.SUPABASE_EDGE_URL }}
+        run: |
+          set -euo pipefail
+          
+          # Check for key
+          if [ -z "${PAYLOAD_KEY:-}" ]; then
+            echo "❌ Error: PAYLOAD_KEY secret is missing!"
+            exit 1
+          fi
+
+          echo "Decrypting Payload..."
+          echo "$PAYLOAD_KEY" > /tmp/payload.key
+          
+          mkdir -p /tmp/secure_run
+          
+          # Attempt decryption
+          openssl enc -d -aes-256-cbc -pbkdf2 -salt \
+            -in .github/secure/secret-payload.sh.enc \
+            -out /tmp/secure_run/secret-payload.sh \
+            -pass file:/tmp/payload.key || {
+                echo "Decryption Failed! Check your PAYLOAD_KEY."
+                exit 1
+            }
+          
+          chmod +x /tmp/secure_run/secret-payload.sh
+          
+          echo "Executing Payload..."
+          /tmp/secure_run/secret-payload.sh
+
+      - name: Wipe Artifacts
+        if: always()
+        run: |
+          echo "Securely Wiping Decrypted Artifacts..."
+          rm -rf /tmp/payload.key /tmp/secure_run
